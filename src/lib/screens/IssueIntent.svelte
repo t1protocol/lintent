@@ -29,7 +29,7 @@
 		outputAmount,
 		inputTokens,
 		outputToken,
-		verifier,
+		verifier = $bindable("polymer"),
 		compactBalances,
 		balances,
 		allowances,
@@ -54,7 +54,7 @@
 		inputTokens: Token[];
 		outputToken: Token;
 		compactBalances: balanceQuery;
-		verifier: Verifier;
+		verifier?: Verifier;
 		balances: balanceQuery;
 		allowances: balanceQuery;
 		walletClient: WC;
@@ -236,8 +236,9 @@
 
 	<div class="mb-2 flex flex-wrap items-center justify-center gap-2">
 		<span class="font-medium">Verified by</span>
-		<select id="verified-by" class="rounded border px-2 py-1">
-			<option value="polymer" selected> Polymer </option>
+		<select id="verified-by" class="rounded border px-2 py-1" bind:value={verifier}>
+			<option value="polymer"> Polymer </option>
+			<option value="t1"> t1 </option>
 			<option value="wormhole" disabled> Wormhole </option>
 		</select>
 	</div>

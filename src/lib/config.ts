@@ -33,6 +33,17 @@ export const POLYMER_ORACLE = {
 	arbitrumSepolia: "0x00d5b500ECa100F7cdeDC800eC631Aca00BaAC00",
 	optimismSepolia: "0x00d5b500ECa100F7cdeDC800eC631Aca00BaAC00"
 } as const;
+export const T1_ORACLE = {
+	// mainnet - t1 messenger/oracle contracts
+	ethereum: "0x0000000000000000000000000000000000000000", // TODO: Add t1 oracle address for Ethereum
+	arbitrum: "0xfB7A94642b3c69d1abC057c045bF197767ed5c29",
+	base: "0xdbA711a6c1b187479e9a5b33020E5217D0BD5A1f",
+	// testnet
+	sepolia: "0x0000000000000000000000000000000000000000", // TODO: Add t1 oracle address for Sepolia
+	baseSepolia: "0x0000000000000000000000000000000000000000", // TODO: Add t1 oracle address for Base Sepolia
+	arbitrumSepolia: "0x0000000000000000000000000000000000000000", // TODO: Add t1 oracle address for Arbitrum Sepolia
+	optimismSepolia: "0x0000000000000000000000000000000000000000" // TODO: Add t1 oracle address for Optimism Sepolia
+} as const;
 
 export type availableAllocators = typeof ALWAYS_OK_ALLOCATOR | typeof POLYMER_ALLOCATOR;
 export type availableInputSettlers =
@@ -230,7 +241,7 @@ export const polymerChainIds = {
 	optimismSepolia: optimismSepolia.id
 } as const;
 
-export type Verifier = "wormhole" | "polymer";
+export type Verifier = "wormhole" | "polymer" | "t1";
 
 export function getCoin(
 	args:
@@ -286,6 +297,7 @@ export function formatTokenDecimals(
 
 export function getOracle(verifier: Verifier, chain: chain) {
 	if (verifier === "polymer") return POLYMER_ORACLE[chain];
+	if (verifier === "t1") return T1_ORACLE[chain];
 	// if (verifier === "wormhole") return (WORMHOLE_ORACLE[chain] ?? ADDRESS_ZERO);
 }
 

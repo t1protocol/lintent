@@ -7,6 +7,7 @@ import {
 	getOracle,
 	INPUT_SETTLER_COMPACT_LIFI,
 	INPUT_SETTLER_ESCROW_LIFI,
+	T1_ORACLE,
 	type WC
 } from "$lib/config";
 import { encodeAbiParameters, maxUint256, parseAbiParameters } from "viem";
@@ -14,6 +15,7 @@ import type { MandateOutput, OrderContainer } from "../../types";
 import { addressToBytes32, bytes32ToAddress } from "$lib/utils/convert";
 import axios from "axios";
 import { POLYMER_ORACLE_ABI } from "$lib/abi/polymeroracle";
+import { T1_ORACLE_ABI } from "$lib/abi/t1oracle";
 import { SETTLER_COMPACT_ABI } from "$lib/abi/settlercompact";
 import { COIN_FILLER_ABI } from "$lib/abi/outputsettler";
 import { ERC20_ABI } from "$lib/abi/erc20";
@@ -50,57 +52,69 @@ export class Solver {
 			}
 
 			const outputChain = getChainName(outputs[0].chainId);
-			console.log({ outputChain });
-			for (const output of outputs) {
-				if (output.token === BYTES32_ZERO) {
-					// The destination asset cannot be ETH.
-					throw new Error("Output token cannot be ETH");
-				}
-				if (output.chainId != outputs[0].chainId) {
-					throw new Error("Filling outputs on multiple chains with single fill call not supported");
-				}
-				if (output.settler != outputs[0].settler) {
-					throw new Error("Different settlers on outputs, not supported");
-				}
+			console.log("Solver.fill started:", { outputChain, orderId });
+			try {
+				for (const output of outputs) {
+					if (output.token === BYTES32_ZERO) {
+						// The destination asset cannot be ETH.
+						throw new Error("Output token cannot be ETH");
+					}
+					if (output.chainId != outputs[0].chainId) {
+						throw new Error("Filling outputs on multiple chains with single fill call not supported");
+					}
+					if (output.settler != outputs[0].settler) {
+						throw new Error("Different settlers on outputs, not supported");
+					}
 
-				// Check allowance & set allowance if needed
-				const assetAddress = bytes32ToAddress(output.token);
-				const allowance = await publicClients[outputChain].readContract({
-					address: assetAddress,
-					abi: ERC20_ABI,
-					functionName: "allowance",
-					args: [account(), bytes32ToAddress(output.settler)]
-				});
-				if (preHook) await preHook(outputChain);
-				if (BigInt(allowance) < output.amount) {
-					const approveTransaction = await walletClient.writeContract({
-						chain: chainMap[outputChain],
-						account: account(),
+					// Check allowance & set allowance if needed
+					const assetAddress = bytes32ToAddress(output.token);
+					console.log("Solver.fill checking allowance:", { assetAddress, account: account() });
+					const allowance = await publicClients[outputChain].readContract({
 						address: assetAddress,
 						abi: ERC20_ABI,
-						functionName: "approve",
-						args: [bytes32ToAddress(output.settler), maxUint256]
+						functionName: "allowance",
+						args: [account(), bytes32ToAddress(output.settler)]
 					});
-					await clients[outputChain].waitForTransactionReceipt({
-						hash: approveTransaction
-					});
+					console.log("Solver.fill allowance:", { allowance, needed: output.amount });
+					if (preHook) await preHook(outputChain);
+					if (BigInt(allowance) < output.amount) {
+						console.log("Solver.fill requesting approval...");
+						const approveTransaction = await walletClient.writeContract({
+							chain: chainMap[outputChain],
+							account: account(),
+							address: assetAddress,
+							abi: ERC20_ABI,
+							functionName: "approve",
+							args: [bytes32ToAddress(output.settler), maxUint256]
+						});
+						console.log("Solver.fill approval tx:", approveTransaction);
+						await clients[outputChain].waitForTransactionReceipt({
+							hash: approveTransaction
+						});
+					}
 				}
-			}
 
-			const transactionHash = await walletClient.writeContract({
-				chain: chainMap[outputChain],
-				account: account(),
-				address: bytes32ToAddress(outputs[0].settler),
-				abi: COIN_FILLER_ABI,
-				functionName: "fillOrderOutputs",
-				args: [orderId, outputs, order.fillDeadline, addressToBytes32(account())]
-			});
-			await clients[outputChain].waitForTransactionReceipt({
-				hash: transactionHash
-			});
-			// orderInputs.validate[index] = transcationHash;
-			if (postHook) await postHook();
-			return transactionHash;
+				console.log("Solver.fill calling fillOrderOutputs...");
+				const transactionHash = await walletClient.writeContract({
+					chain: chainMap[outputChain],
+					account: account(),
+					address: bytes32ToAddress(outputs[0].settler),
+					abi: COIN_FILLER_ABI,
+					functionName: "fillOrderOutputs",
+					args: [orderId, outputs, order.fillDeadline, addressToBytes32(account())]
+				});
+				console.log("Solver.fill tx submitted:", transactionHash);
+				await clients[outputChain].waitForTransactionReceipt({
+					hash: transactionHash
+				});
+				console.log("Solver.fill completed successfully");
+				// orderInputs.validate[index] = transcationHash;
+				if (postHook) await postHook();
+				return transactionHash;
+			} catch (err) {
+				console.error("Solver.fill error:", err);
+				throw err;
+			}
 		};
 	}
 
@@ -116,7 +130,7 @@ export class Solver {
 		return async () => {
 			const { preHook, postHook, account } = opts;
 			const {
-				orderContainer: { order },
+				orderContainer: { order, inputSettler },
 				fillTransactionHash,
 				mainnet
 			} = args;
@@ -175,6 +189,93 @@ export class Solver {
 
 					const result = await clients[sourceChain].waitForTransactionReceipt({
 						hash: transcationHash
+					});
+					if (postHook) await postHook();
+					return result;
+				}
+			}
+
+			if (order.inputOracle === getOracle("t1", sourceChain)) {
+				// t1 proof validation - request proof via POST, then poll GET for result
+				const t1OracleAddress = T1_ORACLE[sourceChain];
+				const output = order.outputs[0];
+				const orderId = getOrderId({ order, inputSettler });
+
+				console.log("t1 validation started:", {
+					sourceChain,
+					outputChain,
+					t1OracleAddress,
+					orderInputOracle: order.inputOracle,
+					outputChainId: Number(output.chainId),
+					originChainId: Number(order.originChainId),
+					orderId,
+					outputSettler: bytes32ToAddress(output.settler)
+				});
+
+				// First, POST to request a proof
+				const postPayload = {
+					destinationDomain: Number(output.chainId),
+					targetContract: bytes32ToAddress(output.settler),
+					orderId,
+					output,
+					requester: t1OracleAddress
+				};
+				console.log("t1 POST request payload:", postPayload);
+
+				try {
+					const postResponse = await axios.post(`/t1`, postPayload);
+					console.log("t1 POST response:", postResponse.data);
+				} catch (err) {
+					console.error("t1 POST request failed:", err);
+				}
+
+				// Then poll GET for the proof
+				let proofCalldata: string | undefined;
+				for (let i = 0; i < 10; ++i) {
+					// Query t1 API for existing proofs
+					// Direction is from origin chain (where intent was created) to output chain (where fill happened)
+					// Address is the t1 oracle on the origin chain (the requester)
+					const queryParams = {
+						address: t1OracleAddress,
+						srcChainId: Number(order.originChainId),
+						dstChainId: Number(output.chainId)
+					};
+					console.log(`t1 GET query attempt ${i + 1}/10:`, queryParams);
+
+					const response = await axios.get(`/t1`, { params: queryParams });
+					const dat = response.data as {
+						proof: string | undefined;
+						requestId: string | undefined;
+						status: string;
+						debug?: any;
+					};
+					console.log("t1 GET query response:", dat);
+
+					if (dat.proof && dat.status === "complete") {
+						proofCalldata = dat.proof;
+						break;
+					}
+					// Wait with exponential backoff before querying again
+					await new Promise((r) => setTimeout(r, (i + 1) * 2000));
+				}
+
+				console.log({ t1ProofCalldata: proofCalldata });
+
+				if (proofCalldata) {
+					if (preHook) await preHook(sourceChain);
+
+					// Submit the proof calldata to the t1 oracle
+					const transactionHash = await walletClient.writeContract({
+						chain: chainMap[sourceChain],
+						account: account(),
+						address: order.inputOracle,
+						abi: T1_ORACLE_ABI,
+						functionName: "handleReadResultWithProof",
+						args: [`0x${proofCalldata.replace("0x", "")}`]
+					});
+
+					const result = await clients[sourceChain].waitForTransactionReceipt({
+						hash: transactionHash
 					});
 					if (postHook) await postHook();
 					return result;

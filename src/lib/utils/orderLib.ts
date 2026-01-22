@@ -1,6 +1,6 @@
 import { encodeAbiParameters, encodePacked, keccak256, parseAbiParameters } from "viem";
 import type { MandateOutput, StandardOrder } from "../../types";
-import { type chain, chainMap, POLYMER_ORACLE, WORMHOLE_ORACLE } from "$lib/config";
+import { ADDRESS_ZERO, type chain, chainMap, POLYMER_ORACLE, T1_ORACLE, WORMHOLE_ORACLE } from "$lib/config";
 
 export function getOrderId(orderContainer: { order: StandardOrder; inputSettler: `0x${string}` }) {
 	const { order, inputSettler } = orderContainer;
@@ -118,10 +118,11 @@ export function validateOrder(order: StandardOrder): boolean {
 		return v.id === Number(order.originChainId);
 	})?.[0] as chain | undefined;
 	if (!inputChain) return false;
-	// Polymer?
-	const isPolymer = POLYMER_ORACLE[inputChain] !== order.inputOracle;
-	const isWormhole = WORMHOLE_ORACLE[inputChain] !== order.inputOracle;
-	const whitelistedOracle = isPolymer || isWormhole;
+	// Check if oracle is whitelisted (Polymer, Wormhole, or t1)
+	const isPolymer = POLYMER_ORACLE[inputChain] === order.inputOracle;
+	const isWormhole = (WORMHOLE_ORACLE[inputChain as keyof typeof WORMHOLE_ORACLE] ?? ADDRESS_ZERO) === order.inputOracle;
+	const isT1 = T1_ORACLE[inputChain] === order.inputOracle;
+	const whitelistedOracle = isPolymer || isWormhole || isT1;
 	if (!whitelistedOracle) return false;
 
 	// 4. Check inputs.

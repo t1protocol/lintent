@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git clone:*)",
+      "Bash(npm run check:*)",
+      "Bash(npm install:*)",
+      "Bash(npx tsc --noEmit --skipLibCheck)",
+      "Bash(npm run dev:*)",
+      "Bash(open http://localhost:5174/)",
+      "Bash(npx tsc:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)"
+    ]
+  }
+}

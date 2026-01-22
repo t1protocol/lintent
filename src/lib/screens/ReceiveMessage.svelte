@@ -4,6 +4,7 @@
 		getChainName,
 		getClient,
 		getCoin,
+		getOracle,
 		type chain,
 		type WC
 	} from "$lib/config";
@@ -14,6 +15,7 @@
 	import { POLYMER_ORACLE_ABI } from "$lib/abi/polymeroracle";
 	import { Solver } from "$lib/libraries/solver";
 	import AwaitButton from "$lib/components/AwaitButton.svelte";
+	import axios from "axios";
 
 	// This script needs to be updated to be able to fetch the associated events of fills. Currently, this presents an issue since it can only fill single outputs.
 
@@ -55,6 +57,42 @@
 		)
 			return false;
 		const { order } = orderContainer;
+		const sourceChain = getChainName(order.originChainId);
+
+		// Check if this is a t1 oracle - use API query instead of isProven
+		const t1Oracle = getOracle("t1", sourceChain);
+		console.log("isValidated check:", {
+			orderInputOracle: order.inputOracle,
+			t1Oracle,
+			sourceChain,
+			isT1: t1Oracle && order.inputOracle.toLowerCase() === t1Oracle.toLowerCase()
+		});
+
+		if (t1Oracle && order.inputOracle.toLowerCase() === t1Oracle.toLowerCase()) {
+			try {
+				// Direction is from origin chain (where intent was created) to output chain (where fill happened)
+				const queryParams = {
+					address: order.inputOracle,
+					srcChainId: Number(order.originChainId),
+					dstChainId: Number(output.chainId)
+				};
+				console.log("t1 isValidated query:", queryParams);
+
+				const response = await axios.get(`/t1`, { params: queryParams });
+				const dat = response.data as {
+					proof: string | undefined;
+					status: string;
+					debug?: any;
+				};
+				console.log("t1 isValidated response:", dat);
+				return dat.status === "complete" && !!dat.proof;
+			} catch (err) {
+				console.error("t1 isValidated error:", err);
+				return false;
+			}
+		}
+
+		// Polymer oracle - use isProven function
 		const outputClient = getClient(output.chainId);
 		const transactionReceipt = await outputClient.getTransactionReceipt({
 			hash: fillTransactionHash
