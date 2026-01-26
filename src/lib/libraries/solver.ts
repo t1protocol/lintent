@@ -196,12 +196,21 @@ export class Solver {
 			}
 
 			if (order.inputOracle === getOracle("t1", sourceChain)) {
-				// t1 proof validation - request proof via POST, then poll GET for result
+				// T1Oracle proof validation - request proof via POST, then poll GET for result
 				const t1OracleAddress = T1_ORACLE[sourceChain];
 				const output = order.outputs[0];
 				const orderId = getOrderId({ order, inputSettler });
 
-				console.log("t1 validation started:", {
+				// Get the fill timestamp from the fill transaction
+				const transactionReceipt = await clients[outputChain].getTransactionReceipt({
+					hash: fillTransactionHash as `0x${string}`
+				});
+				const block = await clients[outputChain].getBlock({
+					blockHash: transactionReceipt.blockHash
+				});
+				const fillTimestamp = Number(block.timestamp);
+
+				console.log("T1Oracle validation started:", {
 					sourceChain,
 					outputChain,
 					t1OracleAddress,
@@ -209,7 +218,8 @@ export class Solver {
 					outputChainId: Number(output.chainId),
 					originChainId: Number(order.originChainId),
 					orderId,
-					outputSettler: bytes32ToAddress(output.settler)
+					outputSettler: bytes32ToAddress(output.settler),
+					fillTimestamp
 				});
 
 				// First, POST to request a proof
@@ -220,27 +230,26 @@ export class Solver {
 					output,
 					requester: t1OracleAddress
 				};
-				console.log("t1 POST request payload:", postPayload);
+				console.log("t1 Read Request POST request payload:", postPayload);
 
 				try {
 					const postResponse = await axios.post(`/t1`, postPayload);
-					console.log("t1 POST response:", postResponse.data);
+					console.log("t1 Read Request POST response:", postResponse.data);
 				} catch (err) {
-					console.error("t1 POST request failed:", err);
+					console.error("t1 Read Request POST request failed:", err);
 				}
 
 				// Then poll GET for the proof
 				let proofCalldata: string | undefined;
 				for (let i = 0; i < 10; ++i) {
-					// Query t1 API for existing proofs
+					// Query T1 API for existing proofs
 					// Direction is from origin chain (where intent was created) to output chain (where fill happened)
-					// Address is the t1 oracle on the origin chain (the requester)
 					const queryParams = {
 						address: t1OracleAddress,
 						srcChainId: Number(order.originChainId),
 						dstChainId: Number(output.chainId)
 					};
-					console.log(`t1 GET query attempt ${i + 1}/10:`, queryParams);
+					console.log(`T1Oracle GET query attempt ${i + 1}/10:`, queryParams);
 
 					const response = await axios.get(`/t1`, { params: queryParams });
 					const dat = response.data as {
@@ -249,7 +258,7 @@ export class Solver {
 						status: string;
 						debug?: any;
 					};
-					console.log("t1 GET query response:", dat);
+					console.log("T1Oracle GET query response:", dat);
 
 					if (dat.proof && dat.status === "complete") {
 						proofCalldata = dat.proof;
@@ -264,14 +273,21 @@ export class Solver {
 				if (proofCalldata) {
 					if (preHook) await preHook(sourceChain);
 
-					// Submit the proof calldata to the t1 oracle
+					// Call T1Oracle.receiveMessageWithPreimage with the proof and preimage
 					const transactionHash = await walletClient.writeContract({
 						chain: chainMap[sourceChain],
 						account: account(),
 						address: order.inputOracle,
 						abi: T1_ORACLE_ABI,
-						functionName: "handleReadResultWithProof",
-						args: [`0x${proofCalldata.replace("0x", "")}`]
+						functionName: "receiveMessageWithPreimage",
+						args: [
+							`0x${proofCalldata.replace("0x", "")}` as `0x${string}`,
+							Number(output.chainId), // remoteChainId (where fill happened)
+							addressToBytes32(account()), // solver
+							fillTimestamp, // timestamp
+							orderId, // orderId
+							output // MandateOutput
+						]
 					});
 
 					const result = await clients[sourceChain].waitForTransactionReceipt({

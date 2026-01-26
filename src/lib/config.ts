@@ -34,15 +34,15 @@ export const POLYMER_ORACLE = {
 	optimismSepolia: "0x00d5b500ECa100F7cdeDC800eC631Aca00BaAC00"
 } as const;
 export const T1_ORACLE = {
-	// mainnet - t1 messenger/oracle contracts
-	ethereum: "0x0000000000000000000000000000000000000000", // TODO: Add t1 oracle address for Ethereum
-	arbitrum: "0xfB7A94642b3c69d1abC057c045bF197767ed5c29",
-	base: "0xdbA711a6c1b187479e9a5b33020E5217D0BD5A1f",
+	// mainnet - T1Oracle contracts for OIF attestation
+	ethereum: "0x0000000000000000000000000000000000000000", // TODO: Add T1Oracle address for Ethereum
+	arbitrum: "0xf0448b81bc9d1adffbcb34b856d73174dba03eb5",
+	base: "0xe0f3ec825b60f952343c07e472087a85f6a4eb7e",
 	// testnet
-	sepolia: "0x0000000000000000000000000000000000000000", // TODO: Add t1 oracle address for Sepolia
-	baseSepolia: "0x0000000000000000000000000000000000000000", // TODO: Add t1 oracle address for Base Sepolia
-	arbitrumSepolia: "0x0000000000000000000000000000000000000000", // TODO: Add t1 oracle address for Arbitrum Sepolia
-	optimismSepolia: "0x0000000000000000000000000000000000000000" // TODO: Add t1 oracle address for Optimism Sepolia
+	sepolia: "0x0000000000000000000000000000000000000000", // TODO: Add T1Oracle address for Sepolia
+	baseSepolia: "0x0000000000000000000000000000000000000000", // TODO: Add T1Oracle address for Base Sepolia
+	arbitrumSepolia: "0x0000000000000000000000000000000000000000", // TODO: Add T1Oracle address for Arbitrum Sepolia
+	optimismSepolia: "0x0000000000000000000000000000000000000000" // TODO: Add T1Oracle address for Optimism Sepolia
 } as const;
 
 export type availableAllocators = typeof ALWAYS_OK_ALLOCATOR | typeof POLYMER_ALLOCATOR;
