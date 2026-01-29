@@ -83,7 +83,10 @@ export class Intent {
 		}
 
 		const outputSettler = COIN_FILLER;
-		const outputOracle = getOracle(verifier, outputToken.chain)!;
+		// IMPORTANT: output.oracle must be the T1Oracle on the SOURCE chain, not the output chain.
+		// T1Oracle stores attestations under address(this).toIdentifier(), so _validateFills
+		// must query using the same address (T1Oracle on the source chain).
+		const outputOracle = getOracle(verifier, inputChain)!;
 		const inputOracle = getOracle(verifier, inputChain)!;
 
 		// Get the current epoch timestamp:

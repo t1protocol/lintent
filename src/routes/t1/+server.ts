@@ -145,14 +145,12 @@ export const GET: RequestHandler = async ({ url }) => {
 	const address = url.searchParams.get("address");
 	const srcChainId = url.searchParams.get("srcChainId");
 	const dstChainId = url.searchParams.get("dstChainId");
+	const orderId = url.searchParams.get("orderId");
+	const targetContract = url.searchParams.get("targetContract");
 	const page = url.searchParams.get("page") ?? "1";
-	const pageSize = url.searchParams.get("pageSize") ?? "10";
+	const pageSize = url.searchParams.get("pageSize") ?? "100";
 
-	console.log("t1 GET request params:", { address, srcChainId, dstChainId, page, pageSize });
-
-	if (!address) {
-		return json({ error: "address parameter is required" }, { status: 400 });
-	}
+	console.log("t1 GET request params:", { address, srcChainId, dstChainId, orderId, targetContract, page, pageSize });
 
 	// Determine direction from chain IDs
 	let direction: string | undefined;
@@ -160,6 +158,24 @@ export const GET: RequestHandler = async ({ url }) => {
 		direction = getDirection(Number(srcChainId), Number(dstChainId));
 	}
 	console.log("t1 direction:", direction);
+
+	// The T1 API requires an address parameter (filters by messageSender)
+	// Note: The API filters by messageSender which is the postman service's signer
+	// not the T1Oracle address. If we query with T1Oracle address, we may get 0 results.
+	// We still make the call and filter by orderId, relying on on-chain verification as backup.
+	if (!address) {
+		return json({
+			proof: undefined,
+			requestId: undefined,
+			status: "pending",
+			results: [],
+			total: 0,
+			debug: {
+				message: "Address parameter required by T1 API",
+				note: "Use on-chain T1Oracle.isProven() for verification"
+			}
+		});
+	}
 
 	try {
 		const params = new URLSearchParams({
@@ -184,8 +200,31 @@ export const GET: RequestHandler = async ({ url }) => {
 		const data = response.data;
 		console.log("t1 raw API response:", JSON.stringify(data, null, 2));
 
-		// Extract the most recent proof if available
-		const results = data.data?.results ?? [];
+		let results = data.data?.results ?? [];
+
+		// Filter results by orderId if provided
+		// The orderId appears in the callData (message field) as part of getFillRecord encoding
+		if (orderId && results.length > 0) {
+			const orderIdNormalized = orderId.toLowerCase().replace("0x", "");
+			results = results.filter((r: any) => {
+				const message = r.claim_info?.message?.toLowerCase() ?? "";
+				// The callData contains the orderId as a bytes32 parameter
+				return message.includes(orderIdNormalized);
+			});
+			console.log(`t1 filtered by orderId ${orderId}: ${results.length} results`);
+		}
+
+		// Filter by targetContract if provided
+		if (targetContract && results.length > 0) {
+			const targetNormalized = targetContract.toLowerCase();
+			results = results.filter((r: any) => {
+				const to = r.claim_info?.to?.toLowerCase() ?? "";
+				return to === targetNormalized;
+			});
+			console.log(`t1 filtered by targetContract ${targetContract}: ${results.length} results`);
+		}
+
+		// Get the most recent matching proof
 		const latestProof = results.length > 0 ? results[0] : null;
 
 		const result = {
@@ -193,16 +232,19 @@ export const GET: RequestHandler = async ({ url }) => {
 			requestId: latestProof?.claim_info?.request_id,
 			status: latestProof ? "complete" : "pending",
 			results,
-			total: data.data?.total ?? 0,
+			total: results.length,
 			// Debug info
 			debug: {
 				address,
 				srcChainId,
 				dstChainId,
+				orderId,
+				targetContract,
 				direction,
 				apiUrl,
 				rawTotal: data.data?.total,
-				rawResultsCount: results.length
+				rawResultsCount: data.data?.results?.length ?? 0,
+				filteredResultsCount: results.length
 			}
 		};
 
@@ -213,7 +255,7 @@ export const GET: RequestHandler = async ({ url }) => {
 			{
 				error: "Failed to query t1 proofs",
 				status: "error",
-				debug: { address, srcChainId, dstChainId, direction }
+				debug: { address, srcChainId, dstChainId, orderId, direction }
 			},
 			{ status: 500 }
 		);

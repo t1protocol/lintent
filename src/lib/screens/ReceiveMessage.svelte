@@ -13,6 +13,7 @@
 	import { keccak256 } from "viem";
 	import type { MandateOutput, OrderContainer } from "../../types";
 	import { POLYMER_ORACLE_ABI } from "$lib/abi/polymeroracle";
+	import { T1_ORACLE_ABI } from "$lib/abi/t1oracle";
 	import { Solver } from "$lib/libraries/solver";
 	import AwaitButton from "$lib/components/AwaitButton.svelte";
 	import axios from "axios";
@@ -59,7 +60,7 @@
 		const { order } = orderContainer;
 		const sourceChain = getChainName(order.originChainId);
 
-		// Check if this is a t1 oracle - use API query instead of isProven
+		// Check if this is a t1 oracle - verify on-chain attestation via isProven
 		const t1Oracle = getOracle("t1", sourceChain);
 		console.log("isValidated check:", {
 			orderInputOracle: order.inputOracle,
@@ -70,22 +71,44 @@
 
 		if (t1Oracle && order.inputOracle.toLowerCase() === t1Oracle.toLowerCase()) {
 			try {
-				// Direction is from origin chain (where intent was created) to output chain (where fill happened)
-				const queryParams = {
-					address: order.inputOracle,
-					srcChainId: Number(order.originChainId),
-					dstChainId: Number(output.chainId)
-				};
-				console.log("t1 isValidated query:", queryParams);
+				// Get fill transaction details for timestamp and solver
+				const outputClient = getClient(output.chainId);
+				const transactionReceipt = await outputClient.getTransactionReceipt({
+					hash: fillTransactionHash
+				});
+				const block = await outputClient.getBlock({
+					blockHash: transactionReceipt.blockHash
+				});
 
-				const response = await axios.get(`/t1`, { params: queryParams });
-				const dat = response.data as {
-					proof: string | undefined;
-					status: string;
-					debug?: any;
-				};
-				console.log("t1 isValidated response:", dat);
-				return dat.status === "complete" && !!dat.proof;
+				// Compute payloadHash = keccak256(encodeFillDescription(solver, orderId, timestamp, output))
+				const solver = addressToBytes32(transactionReceipt.from);
+				const encodedOutput = encodeMandateOutput(
+					solver,
+					orderId,
+					Number(block.timestamp),
+					output
+				);
+				const payloadHash = keccak256(encodedOutput);
+
+				console.log("t1 isValidated computing payloadHash:", {
+					solver,
+					orderId,
+					timestamp: Number(block.timestamp),
+					payloadHash
+				});
+
+				// Check on-chain attestation via T1Oracle.isProven
+				// isProven(remoteChainId, remoteOracle, application, dataHash)
+				const sourceChainClient = getClient(order.originChainId);
+				const isProven = await sourceChainClient.readContract({
+					address: order.inputOracle,
+					abi: T1_ORACLE_ABI,
+					functionName: "isProven",
+					args: [output.chainId, output.oracle, output.settler, payloadHash]
+				});
+
+				console.log("t1 isValidated on-chain result:", isProven);
+				return isProven as boolean;
 			} catch (err) {
 				console.error("t1 isValidated error:", err);
 				return false;

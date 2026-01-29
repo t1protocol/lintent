@@ -142,13 +142,33 @@ export class Solver {
 			// The destination asset cannot be ETH.
 			const output = order.outputs[0];
 
-			if (order.inputOracle === getOracle("polymer", sourceChain)) {
+			// Debug: log oracle comparison
+			const polymerOracle = getOracle("polymer", sourceChain);
+			const t1Oracle = getOracle("t1", sourceChain);
+			console.log("Solver.validate oracle check:", {
+				orderInputOracle: order.inputOracle,
+				polymerOracle,
+				t1Oracle,
+				sourceChain,
+				isPolymer: order.inputOracle.toLowerCase() === polymerOracle?.toLowerCase(),
+				isT1: order.inputOracle.toLowerCase() === t1Oracle?.toLowerCase()
+			});
+
+			// Check Polymer oracle (T1 is checked separately below)
+			if (polymerOracle && order.inputOracle.toLowerCase() === polymerOracle.toLowerCase()) {
 				const transactionReceipt = await clients[outputChain].getTransactionReceipt({
 					hash: fillTransactionHash as `0x${string}`
 				});
 
 				const numlogs = transactionReceipt.logs.length;
-				if (numlogs !== 2) throw Error(`Unexpected Logs count ${numlogs}`);
+				if (numlogs < 2) {
+					console.error("Polymer validation: unexpected logs count", {
+						numlogs,
+						fillTransactionHash,
+						transactionReceipt
+					});
+					throw Error(`Unexpected Logs count ${numlogs} - expected at least 2 logs from fill tx`);
+				}
 				const fillLog = transactionReceipt.logs[1]; // The first log is transfer, next is fill.
 
 				let proof: string | undefined;
@@ -195,7 +215,7 @@ export class Solver {
 				}
 			}
 
-			if (order.inputOracle === getOracle("t1", sourceChain)) {
+			if (t1Oracle && order.inputOracle.toLowerCase() === t1Oracle.toLowerCase()) {
 				// T1Oracle proof validation - request proof via POST, then poll GET for result
 				const t1OracleAddress = T1_ORACLE[sourceChain];
 				const output = order.outputs[0];
@@ -243,11 +263,14 @@ export class Solver {
 				let proofCalldata: string | undefined;
 				for (let i = 0; i < 10; ++i) {
 					// Query T1 API for existing proofs
-					// Direction is from origin chain (where intent was created) to output chain (where fill happened)
+					// Note: The API filters by messageSender (postman's signer), not by T1Oracle address
+					// We still pass address for the API call, and filter by orderId client-side
 					const queryParams = {
 						address: t1OracleAddress,
 						srcChainId: Number(order.originChainId),
-						dstChainId: Number(output.chainId)
+						dstChainId: Number(output.chainId),
+						orderId,
+						targetContract: bytes32ToAddress(output.settler)
 					};
 					console.log(`T1Oracle GET query attempt ${i + 1}/10:`, queryParams);
 
@@ -274,6 +297,16 @@ export class Solver {
 					if (preHook) await preHook(sourceChain);
 
 					// Call T1Oracle.receiveMessageWithPreimage with the proof and preimage
+					// IMPORTANT: The solver must match who actually filled the order (from the fill tx)
+					// not the current connected wallet - otherwise preimage verification fails
+					const actualSolver = addressToBytes32(transactionReceipt.from);
+					console.log("T1Oracle proof submission:", {
+						fillTxFrom: transactionReceipt.from,
+						actualSolver,
+						fillTimestamp,
+						connectedAccount: account()
+					});
+
 					const transactionHash = await walletClient.writeContract({
 						chain: chainMap[sourceChain],
 						account: account(),
@@ -281,9 +314,9 @@ export class Solver {
 						abi: T1_ORACLE_ABI,
 						functionName: "receiveMessageWithPreimage",
 						args: [
-							`0x${proofCalldata.replace("0x", "")}` as `0x${string}`,
+							proofCalldata as `0x${string}`, // Use proof raw from API
 							Number(output.chainId), // remoteChainId (where fill happened)
-							addressToBytes32(account()), // solver
+							actualSolver, // solver - must match who filled the order
 							fillTimestamp, // timestamp
 							orderId, // orderId
 							output // MandateOutput
@@ -358,9 +391,18 @@ export class Solver {
 			let transactionHash: `0x${string}`;
 			const actionChain = chainMap[sourceChain];
 
+			// Solver must match who actually filled the order (same as proof submission)
+			const actualSolver = addressToBytes32(transactionReceipt.from);
+			console.log("Finalise - using actual solver from fill tx:", {
+				fillTxFrom: transactionReceipt.from,
+				actualSolver,
+				fillTimestamp: Number(fillTimestamp),
+				connectedAccount: account()
+			});
+
 			const solveParam = {
 				timestamp: Number(fillTimestamp),
-				solver: addressToBytes32(account())
+				solver: actualSolver
 			};
 
 			if (inputSettler.toLowerCase() === INPUT_SETTLER_ESCROW_LIFI.toLowerCase()) {
