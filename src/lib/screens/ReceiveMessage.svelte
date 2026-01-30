@@ -4,6 +4,7 @@
 		getChainName,
 		getClient,
 		getCoin,
+		getOracle,
 		type chain,
 		type WC
 	} from "$lib/config";
@@ -12,8 +13,10 @@
 	import { keccak256 } from "viem";
 	import type { MandateOutput, OrderContainer } from "../../types";
 	import { POLYMER_ORACLE_ABI } from "$lib/abi/polymeroracle";
+	import { T1_ORACLE_ABI } from "$lib/abi/t1oracle";
 	import { Solver } from "$lib/libraries/solver";
 	import AwaitButton from "$lib/components/AwaitButton.svelte";
+	import axios from "axios";
 
 	// This script needs to be updated to be able to fetch the associated events of fills. Currently, this presents an issue since it can only fill single outputs.
 
@@ -55,6 +58,64 @@
 		)
 			return false;
 		const { order } = orderContainer;
+		const sourceChain = getChainName(order.originChainId);
+
+		// Check if this is a t1 oracle - verify on-chain attestation via isProven
+		const t1Oracle = getOracle("t1", sourceChain);
+		console.log("isValidated check:", {
+			orderInputOracle: order.inputOracle,
+			t1Oracle,
+			sourceChain,
+			isT1: t1Oracle && order.inputOracle.toLowerCase() === t1Oracle.toLowerCase()
+		});
+
+		if (t1Oracle && order.inputOracle.toLowerCase() === t1Oracle.toLowerCase()) {
+			try {
+				// Get fill transaction details for timestamp and solver
+				const outputClient = getClient(output.chainId);
+				const transactionReceipt = await outputClient.getTransactionReceipt({
+					hash: fillTransactionHash
+				});
+				const block = await outputClient.getBlock({
+					blockHash: transactionReceipt.blockHash
+				});
+
+				// Compute payloadHash = keccak256(encodeFillDescription(solver, orderId, timestamp, output))
+				const solver = addressToBytes32(transactionReceipt.from);
+				const encodedOutput = encodeMandateOutput(
+					solver,
+					orderId,
+					Number(block.timestamp),
+					output
+				);
+				const payloadHash = keccak256(encodedOutput);
+
+				console.log("t1 isValidated computing payloadHash:", {
+					solver,
+					orderId,
+					timestamp: Number(block.timestamp),
+					payloadHash
+				});
+
+				// Check on-chain attestation via T1Oracle.isProven
+				// isProven(remoteChainId, remoteOracle, application, dataHash)
+				const sourceChainClient = getClient(order.originChainId);
+				const isProven = await sourceChainClient.readContract({
+					address: order.inputOracle,
+					abi: T1_ORACLE_ABI,
+					functionName: "isProven",
+					args: [output.chainId, output.oracle, output.settler, payloadHash]
+				});
+
+				console.log("t1 isValidated on-chain result:", isProven);
+				return isProven as boolean;
+			} catch (err) {
+				console.error("t1 isValidated error:", err);
+				return false;
+			}
+		}
+
+		// Polymer oracle - use isProven function
 		const outputClient = getClient(output.chainId);
 		const transactionReceipt = await outputClient.getTransactionReceipt({
 			hash: fillTransactionHash

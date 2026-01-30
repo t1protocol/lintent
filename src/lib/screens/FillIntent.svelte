@@ -43,14 +43,31 @@
 	async function isFilled(orderId: `0x${string}`, output: MandateOutput, _?: any) {
 		const outputHash = getOutputHash(output);
 		const outputClient = getClient(output.chainId);
-		const result = await outputClient.readContract({
-			address: bytes32ToAddress(output.settler),
-			abi: COIN_FILLER_ABI,
-			functionName: "getFillRecord",
-			args: [orderId, outputHash]
+		const settlerAddress = bytes32ToAddress(output.settler);
+		console.log("isFilled check:", {
+			orderId,
+			outputHash,
+			settlerAddress,
+			outputChainId: Number(output.chainId)
 		});
-		console.log({ orderId, output, result, outputHash });
-		return result;
+		try {
+			const result = await outputClient.readContract({
+				address: settlerAddress,
+				abi: COIN_FILLER_ABI,
+				functionName: "getFillRecord",
+				args: [orderId, outputHash]
+			});
+			console.log("isFilled result:", {
+				orderId,
+				result,
+				isFilled: result !== BYTES32_ZERO
+			});
+			return result;
+		} catch (err) {
+			console.error("isFilled error:", err);
+			// Return BYTES32_ZERO on error so the fill button is enabled
+			return BYTES32_ZERO;
+		}
 	}
 
 	function sortOutputsByChain(orderContainer: OrderContainer) {

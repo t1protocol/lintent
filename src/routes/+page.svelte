@@ -315,7 +315,7 @@
 							{outputAmount}
 							{inputTokens}
 							{outputToken}
-							{verifier}
+							bind:verifier
 							{compactBalances}
 							{balances}
 							{allowances}

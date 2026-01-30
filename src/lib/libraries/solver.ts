@@ -7,6 +7,7 @@ import {
 	getOracle,
 	INPUT_SETTLER_COMPACT_LIFI,
 	INPUT_SETTLER_ESCROW_LIFI,
+	T1_ORACLE,
 	type WC
 } from "$lib/config";
 import { encodeAbiParameters, maxUint256, parseAbiParameters } from "viem";
@@ -14,6 +15,7 @@ import type { MandateOutput, OrderContainer } from "../../types";
 import { addressToBytes32, bytes32ToAddress } from "$lib/utils/convert";
 import axios from "axios";
 import { POLYMER_ORACLE_ABI } from "$lib/abi/polymeroracle";
+import { T1_ORACLE_ABI } from "$lib/abi/t1oracle";
 import { SETTLER_COMPACT_ABI } from "$lib/abi/settlercompact";
 import { COIN_FILLER_ABI } from "$lib/abi/outputsettler";
 import { ERC20_ABI } from "$lib/abi/erc20";
@@ -50,57 +52,69 @@ export class Solver {
 			}
 
 			const outputChain = getChainName(outputs[0].chainId);
-			console.log({ outputChain });
-			for (const output of outputs) {
-				if (output.token === BYTES32_ZERO) {
-					// The destination asset cannot be ETH.
-					throw new Error("Output token cannot be ETH");
-				}
-				if (output.chainId != outputs[0].chainId) {
-					throw new Error("Filling outputs on multiple chains with single fill call not supported");
-				}
-				if (output.settler != outputs[0].settler) {
-					throw new Error("Different settlers on outputs, not supported");
-				}
+			console.log("Solver.fill started:", { outputChain, orderId });
+			try {
+				for (const output of outputs) {
+					if (output.token === BYTES32_ZERO) {
+						// The destination asset cannot be ETH.
+						throw new Error("Output token cannot be ETH");
+					}
+					if (output.chainId != outputs[0].chainId) {
+						throw new Error("Filling outputs on multiple chains with single fill call not supported");
+					}
+					if (output.settler != outputs[0].settler) {
+						throw new Error("Different settlers on outputs, not supported");
+					}
 
-				// Check allowance & set allowance if needed
-				const assetAddress = bytes32ToAddress(output.token);
-				const allowance = await publicClients[outputChain].readContract({
-					address: assetAddress,
-					abi: ERC20_ABI,
-					functionName: "allowance",
-					args: [account(), bytes32ToAddress(output.settler)]
-				});
-				if (preHook) await preHook(outputChain);
-				if (BigInt(allowance) < output.amount) {
-					const approveTransaction = await walletClient.writeContract({
-						chain: chainMap[outputChain],
-						account: account(),
+					// Check allowance & set allowance if needed
+					const assetAddress = bytes32ToAddress(output.token);
+					console.log("Solver.fill checking allowance:", { assetAddress, account: account() });
+					const allowance = await publicClients[outputChain].readContract({
 						address: assetAddress,
 						abi: ERC20_ABI,
-						functionName: "approve",
-						args: [bytes32ToAddress(output.settler), maxUint256]
+						functionName: "allowance",
+						args: [account(), bytes32ToAddress(output.settler)]
 					});
-					await clients[outputChain].waitForTransactionReceipt({
-						hash: approveTransaction
-					});
+					console.log("Solver.fill allowance:", { allowance, needed: output.amount });
+					if (preHook) await preHook(outputChain);
+					if (BigInt(allowance) < output.amount) {
+						console.log("Solver.fill requesting approval...");
+						const approveTransaction = await walletClient.writeContract({
+							chain: chainMap[outputChain],
+							account: account(),
+							address: assetAddress,
+							abi: ERC20_ABI,
+							functionName: "approve",
+							args: [bytes32ToAddress(output.settler), maxUint256]
+						});
+						console.log("Solver.fill approval tx:", approveTransaction);
+						await clients[outputChain].waitForTransactionReceipt({
+							hash: approveTransaction
+						});
+					}
 				}
-			}
 
-			const transactionHash = await walletClient.writeContract({
-				chain: chainMap[outputChain],
-				account: account(),
-				address: bytes32ToAddress(outputs[0].settler),
-				abi: COIN_FILLER_ABI,
-				functionName: "fillOrderOutputs",
-				args: [orderId, outputs, order.fillDeadline, addressToBytes32(account())]
-			});
-			await clients[outputChain].waitForTransactionReceipt({
-				hash: transactionHash
-			});
-			// orderInputs.validate[index] = transcationHash;
-			if (postHook) await postHook();
-			return transactionHash;
+				console.log("Solver.fill calling fillOrderOutputs...");
+				const transactionHash = await walletClient.writeContract({
+					chain: chainMap[outputChain],
+					account: account(),
+					address: bytes32ToAddress(outputs[0].settler),
+					abi: COIN_FILLER_ABI,
+					functionName: "fillOrderOutputs",
+					args: [orderId, outputs, order.fillDeadline, addressToBytes32(account())]
+				});
+				console.log("Solver.fill tx submitted:", transactionHash);
+				await clients[outputChain].waitForTransactionReceipt({
+					hash: transactionHash
+				});
+				console.log("Solver.fill completed successfully");
+				// orderInputs.validate[index] = transcationHash;
+				if (postHook) await postHook();
+				return transactionHash;
+			} catch (err) {
+				console.error("Solver.fill error:", err);
+				throw err;
+			}
 		};
 	}
 
@@ -116,7 +130,7 @@ export class Solver {
 		return async () => {
 			const { preHook, postHook, account } = opts;
 			const {
-				orderContainer: { order },
+				orderContainer: { order, inputSettler },
 				fillTransactionHash,
 				mainnet
 			} = args;
@@ -128,13 +142,33 @@ export class Solver {
 			// The destination asset cannot be ETH.
 			const output = order.outputs[0];
 
-			if (order.inputOracle === getOracle("polymer", sourceChain)) {
+			// Debug: log oracle comparison
+			const polymerOracle = getOracle("polymer", sourceChain);
+			const t1Oracle = getOracle("t1", sourceChain);
+			console.log("Solver.validate oracle check:", {
+				orderInputOracle: order.inputOracle,
+				polymerOracle,
+				t1Oracle,
+				sourceChain,
+				isPolymer: order.inputOracle.toLowerCase() === polymerOracle?.toLowerCase(),
+				isT1: order.inputOracle.toLowerCase() === t1Oracle?.toLowerCase()
+			});
+
+			// Check Polymer oracle (T1 is checked separately below)
+			if (polymerOracle && order.inputOracle.toLowerCase() === polymerOracle.toLowerCase()) {
 				const transactionReceipt = await clients[outputChain].getTransactionReceipt({
 					hash: fillTransactionHash as `0x${string}`
 				});
 
 				const numlogs = transactionReceipt.logs.length;
-				if (numlogs !== 2) throw Error(`Unexpected Logs count ${numlogs}`);
+				if (numlogs < 2) {
+					console.error("Polymer validation: unexpected logs count", {
+						numlogs,
+						fillTransactionHash,
+						transactionReceipt
+					});
+					throw Error(`Unexpected Logs count ${numlogs} - expected at least 2 logs from fill tx`);
+				}
 				const fillLog = transactionReceipt.logs[1]; // The first log is transfer, next is fill.
 
 				let proof: string | undefined;
@@ -175,6 +209,122 @@ export class Solver {
 
 					const result = await clients[sourceChain].waitForTransactionReceipt({
 						hash: transcationHash
+					});
+					if (postHook) await postHook();
+					return result;
+				}
+			}
+
+			if (t1Oracle && order.inputOracle.toLowerCase() === t1Oracle.toLowerCase()) {
+				// T1Oracle proof validation - request proof via POST, then poll GET for result
+				const t1OracleAddress = T1_ORACLE[sourceChain];
+				const output = order.outputs[0];
+				const orderId = getOrderId({ order, inputSettler });
+
+				// Get the fill timestamp from the fill transaction
+				const transactionReceipt = await clients[outputChain].getTransactionReceipt({
+					hash: fillTransactionHash as `0x${string}`
+				});
+				const block = await clients[outputChain].getBlock({
+					blockHash: transactionReceipt.blockHash
+				});
+				const fillTimestamp = Number(block.timestamp);
+
+				console.log("T1Oracle validation started:", {
+					sourceChain,
+					outputChain,
+					t1OracleAddress,
+					orderInputOracle: order.inputOracle,
+					outputChainId: Number(output.chainId),
+					originChainId: Number(order.originChainId),
+					orderId,
+					outputSettler: bytes32ToAddress(output.settler),
+					fillTimestamp
+				});
+
+				// First, POST to request a proof
+				const postPayload = {
+					destinationDomain: Number(output.chainId),
+					targetContract: bytes32ToAddress(output.settler),
+					orderId,
+					output,
+					requester: t1OracleAddress
+				};
+				console.log("t1 Read Request POST request payload:", postPayload);
+
+				try {
+					const postResponse = await axios.post(`/t1`, postPayload);
+					console.log("t1 Read Request POST response:", postResponse.data);
+				} catch (err) {
+					console.error("t1 Read Request POST request failed:", err);
+				}
+
+				// Then poll GET for the proof
+				let proofCalldata: string | undefined;
+				for (let i = 0; i < 10; ++i) {
+					// Query T1 API for existing proofs
+					// Note: The API filters by messageSender (postman's signer), not by T1Oracle address
+					// We still pass address for the API call, and filter by orderId client-side
+					const queryParams = {
+						address: t1OracleAddress,
+						srcChainId: Number(order.originChainId),
+						dstChainId: Number(output.chainId),
+						orderId,
+						targetContract: bytes32ToAddress(output.settler)
+					};
+					console.log(`T1Oracle GET query attempt ${i + 1}/10:`, queryParams);
+
+					const response = await axios.get(`/t1`, { params: queryParams });
+					const dat = response.data as {
+						proof: string | undefined;
+						requestId: string | undefined;
+						status: string;
+						debug?: any;
+					};
+					console.log("T1Oracle GET query response:", dat);
+
+					if (dat.proof && dat.status === "complete") {
+						proofCalldata = dat.proof;
+						break;
+					}
+					// Wait with exponential backoff before querying again
+					await new Promise((r) => setTimeout(r, (i + 1) * 2000));
+				}
+
+				console.log({ t1ProofCalldata: proofCalldata });
+
+				if (proofCalldata) {
+					if (preHook) await preHook(sourceChain);
+
+					// Call T1Oracle.receiveMessageWithPreimage with the proof and preimage
+					// IMPORTANT: The solver must match who actually filled the order (from the fill tx)
+					// not the current connected wallet - otherwise preimage verification fails
+					const actualSolver = addressToBytes32(transactionReceipt.from);
+					console.log("T1Oracle proof submission:", {
+						fillTxFrom: transactionReceipt.from,
+						actualSolver,
+						fillTimestamp,
+						connectedAccount: account()
+					});
+
+					const transactionHash = await walletClient.writeContract({
+						chain: chainMap[sourceChain],
+						account: account(),
+						address: order.inputOracle,
+						abi: T1_ORACLE_ABI,
+						functionName: "receiveMessageWithPreimage",
+						args: [
+							proofCalldata as `0x${string}`, // Use proof raw from API
+							Number(output.chainId), // remoteChainId (where fill happened)
+							actualSolver, // solver - must match who filled the order
+							fillTimestamp, // timestamp
+							orderId, // orderId
+							output // MandateOutput
+						]
+					});
+
+					const result = await clients[sourceChain].waitForTransactionReceipt({
+						hash: transactionHash
 					});
 					if (postHook) await postHook();
 					return result;
@@ -241,9 +391,18 @@ export class Solver {
 			let transactionHash: `0x${string}`;
 			const actionChain = chainMap[sourceChain];
 
+			// Solver must match who actually filled the order (same as proof submission)
+			const actualSolver = addressToBytes32(transactionReceipt.from);
+			console.log("Finalise - using actual solver from fill tx:", {
+				fillTxFrom: transactionReceipt.from,
+				actualSolver,
+				fillTimestamp: Number(fillTimestamp),
+				connectedAccount: account()
+			});
+
 			const solveParam = {
 				timestamp: Number(fillTimestamp),
-				solver: addressToBytes32(account())
+				solver: actualSolver
 			};
 
 			if (inputSettler.toLowerCase() === INPUT_SETTLER_ESCROW_LIFI.toLowerCase()) {
